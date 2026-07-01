@@ -1,0 +1,112 @@
+import json
+import os
+import urllib.error
+import urllib.request
+from typing import Any
+
+from sprint_2.lesson_2_1_web_search import web_search
+from sprint_3.lesson_3_1_schemas import TOOLS
+from sprint_3.lesson_3_2_tool_parsing import execute_tool, parse_tool_call
+
+
+def load_dotenv(env_path=".env"):
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def send_openrouter_request(payload: dict) -> dict:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not set in environment.")
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8")
+        raise RuntimeError(
+            f"OpenRouter request failed: {exc.code} {exc.reason} {error_body}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "Unable to reach OpenRouter. Check network connectivity and API access."
+        ) from exc
+
+
+def extract_text(response: dict) -> str:
+    choices = response.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return message.get("content", "")
+
+
+def run_single_agent(prompt: str) -> str:
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an agent that can call a single web_search tool if needed."
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    for iteration in range(5):
+        payload = {
+            "model": "poolside/laguna-m.1:free",
+            "messages": messages,
+            "tools": TOOLS,
+        }
+
+        response = send_openrouter_request(payload)
+        choices = response.get("choices") or []
+        if not choices:
+            break
+
+        choice = choices[0]
+        tool_call = parse_tool_call(choice)
+        if tool_call.get("name"):
+            tool_output = execute_tool(tool_call["name"], tool_call["arguments"])
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": tool_call["name"],
+                    "content": tool_output,
+                    "tool_call_id": tool_call.get("tool_call_id"),
+                }
+            )
+            continue
+
+        assistant_text = extract_text(response)
+        if assistant_text:
+            return assistant_text
+
+    return "No final response was produced by the agent."
+
+
+def main() -> None:
+    load_dotenv()
+    prompt = input("Enter a prompt for the single-agent tool loop: ").strip()
+    if not prompt:
+        print("Prompt cannot be empty.")
+        return
+
+    output = run_single_agent(prompt)
+    print("\n--- Agent output ---\n")
+    print(output)
+
+
+if __name__ == "__main__":
+    main()
